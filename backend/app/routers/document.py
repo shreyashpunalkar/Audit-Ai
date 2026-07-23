@@ -1,20 +1,30 @@
 """Document router — GET/DELETE /api/document/{id}, PUT /api/document/{id}/json"""
 import logging
+import os
+import json
+from urllib.parse import quote
 from fastapi import APIRouter, Depends
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import Response, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-import json
-import os
 
 from app.database import get_db
 from app.models.document import Document
-from app.schemas.document import DocumentDetailResponse, JsonUpdateRequest, ValidationResult
+from app.schemas.document import DocumentDetailResponse, JsonUpdateRequest
 from app.services.validator import validate_checksheet_json, serialize_json
 from app.utils.error_handler import DocumentNotFoundError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["document"])
+
+
+def _ensure_dict(val):
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except Exception:
+            return None
+    return val
 
 
 @router.get("/document/{document_id}", response_model=DocumentDetailResponse)
@@ -34,7 +44,7 @@ async def get_document(
         file_type=doc.file_type,
         file_size=doc.file_size,
         status=doc.status,
-        extracted_json=doc.extracted_json,
+        extracted_json=_ensure_dict(doc.extracted_json),
         validation_errors=doc.validation_errors,
         error_message=doc.error_message,
         created_at=doc.created_at,
@@ -54,7 +64,12 @@ async def update_document_json(
     if not doc:
         raise DocumentNotFoundError(document_id)
 
-    corrected, errors = validate_checksheet_json(body.json_data)
+    try:
+        corrected, errors = validate_checksheet_json(body.json_data)
+    except ValueError as e:
+        corrected = body.json_data
+        errors = [str(e)]
+
     doc.extracted_json = corrected
     doc.validation_errors = errors
     await db.commit()
@@ -66,7 +81,7 @@ async def update_document_json(
         file_type=doc.file_type,
         file_size=doc.file_size,
         status=doc.status,
-        extracted_json=doc.extracted_json,
+        extracted_json=_ensure_dict(doc.extracted_json),
         validation_errors=doc.validation_errors,
         error_message=doc.error_message,
         created_at=doc.created_at,
@@ -91,25 +106,18 @@ async def download_json(
             content={"error": True, "message": "No JSON available. Process the document first."},
         )
 
-    json_str = serialize_json(doc.extracted_json)
+    json_data = _ensure_dict(doc.extracted_json) or doc.extracted_json
+    json_str = serialize_json(json_data) if isinstance(json_data, dict) else json.dumps(json_data, indent=2)
     base_name = os.path.splitext(doc.original_filename)[0]
     # Sanitize base_name to ensure standard ASCII compatibility for filename="..."
     safe_base = "".join(c if c.isalnum() or c in "._-" else "_" for c in base_name)
     download_name = f"{safe_base}_extracted.json"
 
-    # Write to temp file in uploads dir
-    from app.config import get_settings
-    settings = get_settings()
-    tmp_path = os.path.join(settings.upload_dir, f"dl_{document_id}.json")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(json_str)
-
-    from urllib.parse import quote
     headers = {
         "Content-Disposition": f'attachment; filename="{download_name}"; filename*=utf-8\'\'{quote(download_name)}'
     }
-    return FileResponse(
-        path=tmp_path,
+    return Response(
+        content=json_str,
         media_type="application/json",
         headers=headers,
     )
@@ -126,9 +134,12 @@ async def delete_document(
     if not doc:
         raise DocumentNotFoundError(document_id)
 
-    # Remove file from disk
-    if os.path.exists(doc.file_path):
-        os.remove(doc.file_path)
+    # Remove file from disk safely if present
+    if doc.file_path and os.path.exists(doc.file_path):
+        try:
+            os.remove(doc.file_path)
+        except OSError as e:
+            logger.warning(f"Could not remove file {doc.file_path}: {e}")
 
     await db.delete(doc)
     await db.commit()
