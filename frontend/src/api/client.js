@@ -1,7 +1,19 @@
 import axios from 'axios'
 
+const getApiBaseURL = () => {
+  const envUrl = import.meta.env.VITE_API_URL
+  if (!envUrl) {
+    return '/api'
+  }
+  let url = envUrl.trim().replace(/\/+$/, '')
+  if (!url.endsWith('/api')) {
+    url = `${url}/api`
+  }
+  return url
+}
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api',
+  baseURL: getApiBaseURL(),
   timeout: 120000, // 2 min for AI processing
 })
 
@@ -45,9 +57,8 @@ export async function updateDocumentJson(documentId, jsonData) {
 // ─── Download ───────────────────────────────────────────────────────────────
 
 export function getDownloadUrl(documentId) {
-  const base = import.meta.env.VITE_API_URL || ''
-  const cleanBase = base.endsWith('/') ? base.slice(0, -1) : base
-  return `${cleanBase || '/api'}/download/${documentId}`
+  const base = getApiBaseURL()
+  return `${base}/download/${documentId}`
 }
 
 // ─── Delete ─────────────────────────────────────────────────────────────────
