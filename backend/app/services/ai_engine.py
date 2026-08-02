@@ -31,8 +31,7 @@ SYSTEM_PROMPT = """You are an expert Document Intelligence Lead and Lead QA Auto
    - NO LINE SPILLS: Multiline wrapped text in a cell MUST stay inside its row. NEVER append line breaks or sentence fragments from Row N into Row N-1.
    - PRIMARY KEY ANCHORING: Align cells horizontally using the primary key (e.g., "WS-01", "WS-02", "BSC-201").
 
-3. LITERAL DATA INTEGRITY & CHECKBOX PARSING:
-   - CHECKBOX PARSING INTEGRITY: Always ensure bracketed status items are well-formed pairs (e.g., "[x] Pass  [ ] Fail" or "☑ Pass  ☐ Fail"). If an OCR/text artifact drops a bracket or symbol (e.g., "[ Pass [] Fail"), repair the syntax to standard bracket pairs based on visual/text context.
+3. LITERAL DATA INTEGRITY:
    - Preserve raw cell text exactly as written, including unicode characters ("☑", "☐", "≤", "°", "Pa"), special symbols, raw formatting, typos, and brackets.
    - Do NOT use dummy placeholders like "Table 1" or generic default schema names.
 
@@ -101,21 +100,15 @@ def _is_valid_key(key: str) -> bool:
 
 def _get_providers() -> list[dict]:
     providers = []
-    # Priority 1: Groq Instant (Sub-second speed on LPUs & high TPD capacity)
+    # Priority 1: Groq (Sub-second speed on LPUs)
     if _is_valid_key(settings.groq_api_key):
-        groq_client = AsyncOpenAI(
-            base_url=settings.groq_base_url,
-            api_key=settings.groq_api_key,
-        )
         providers.append({
-            "name": "Groq Instant",
-            "model": "llama-3.1-8b-instant",
-            "client": groq_client,
-        })
-        providers.append({
-            "name": "Groq Versatile",
-            "model": "llama-3.3-70b-versatile",
-            "client": groq_client,
+            "name": "Groq",
+            "model": settings.groq_model,
+            "client": AsyncOpenAI(
+                base_url=settings.groq_base_url,
+                api_key=settings.groq_api_key,
+            ),
         })
     # Priority 2: Gemini
     if _is_valid_key(settings.gemini_api_key):
@@ -306,14 +299,21 @@ async def run_ai_extraction(
         }
 
         try:
+            import asyncio
             try:
-                response = await client.chat.completions.create(
-                    **completion_kwargs,
-                    response_format={"type": "json_object"}
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        **completion_kwargs,
+                        response_format={"type": "json_object"}
+                    ),
+                    timeout=12.0
                 )
             except Exception as e:
                 logger.debug(f"[{provider_name}] json_object response_format retry: {e}")
-                response = await client.chat.completions.create(**completion_kwargs)
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(**completion_kwargs),
+                    timeout=12.0
+                )
 
             raw_text = response.choices[0].message.content or ""
             result = _parse_json_safe(raw_text)
