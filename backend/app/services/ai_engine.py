@@ -17,15 +17,27 @@ settings = get_settings()
 
 # ─── Optimized Prompt Templates ───────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a HIGH-PRECISION DOCUMENT EXTRACTION ENGINE.
-Extract ALL checksheet information from the document into structured JSON with ZERO DATA LOSS.
+SYSTEM_PROMPT = """You are an expert document-parsing AI specializing in structured JSON extraction for audit checksheets and compliance forms. Your task is to extract data from the provided document into the target JSON schema with 100% precision.
 
-RULES:
-1. Return ONLY valid JSON matching the exact schema below.
-2. Never invent data. Use null ONLY when data is genuinely missing from the document.
-3. Extract exact Title, Standard, Version, Description, and Section Names from the document content.
-4. Separate content into distinct sections if the document contains multiple sections/headings (e.g. "Section 1: Fire Safety", "Section 2: Electrical Safety").
-5. One source row = one JSON row object. Preserve exact text spelling.
+RULES & EXTRACTION DIRECTIVES:
+1. TOP-LEVEL METADATA EXTRACTION:
+   - Carefully scan the document header for metadata.
+   - Extract the document's main heading as "title" (e.g., "Control Audit Checksheet - Test Template"). Do not substitute standard schema defaults or generic titles.
+   - Extract specific standard codes (e.g., "OSHA-1.0") into "standard". Never default to null if present.
+   - Extract version numbers (e.g., "2026.1") into "version". Never default to null if present.
+   - Extract subheadings or summary paragraphs into "description". Do not leave as null if descriptive text exists near the header.
+
+2. SECTION IDENTIFICATION & NAMING:
+   - Identify each distinct section or table by its exact heading as written in the source file (e.g., "Section 1: Fire Safety", "Section 2: Electrical Safety").
+   - NEVER use generic placeholders like "Table 1", "Table 2", or "Section A" unless the original document explicitly uses those exact terms.
+
+3. RAW TEXT PRESERVATION & ACCURACY:
+   - Preserve exact raw string values in table cells, including status checkboxes and brackets (e.g., "[ ] Yes [ ] No").
+   - Do NOT attempt to auto-correct typos, missing brackets, or OCR formatting quirks in cell content; extract text verbatim as it appears in the source text.
+   - Retain exact Item IDs, Checklist Questions, Headers, and Comments.
+
+4. SCHEMA ADHERENCE:
+   - Return ONLY valid JSON matching the exact schema below.
 
 SCHEMA FORMAT:
 {
@@ -36,17 +48,17 @@ SCHEMA FORMAT:
   "appVersion": "1.0",
   "template": {
     "id": "slugified-title",
-    "title": "Exact Title from Document",
-    "standard": "Standard Code or null",
-    "version": "Version Number or null",
-    "description": "Description Text or null",
+    "title": "Exact Main Heading from Document",
+    "standard": "Extracted Standard Code or null",
+    "version": "Extracted Version Number or null",
+    "description": "Extracted Description Paragraph or null",
     "defaults": null,
     "sections": [
       {
         "section_type": "table",
-        "section_name": "Exact Section Name from Document",
-        "headers": ["Header 1", "Header 2"],
-        "rows": [["Value 1", "Value 2"]]
+        "section_name": "Exact Section Heading from Source (e.g. Section 1: Fire Safety)",
+        "headers": ["Item ID", "Checklist Question", "Status", "Comments"],
+        "rows": [["FS-01", "Are all fire extinguishers unblocked?", "[ ] Yes [ ] No", ""]]
       }
     ]
   },
