@@ -46,7 +46,7 @@ class Settings(BaseSettings):
 
     @property
     def allowed_origins_list(self) -> List[str]:
-        return [o.strip() for o in self.allowed_origins.split(",")]
+        return [o.strip().rstrip("/") for o in self.allowed_origins.split(",") if o.strip()]
 
     @property
     def max_upload_size_bytes(self) -> int:
@@ -55,10 +55,22 @@ class Settings(BaseSettings):
     def ensure_upload_dir(self):
         os.makedirs(self.upload_dir, exist_ok=True)
 
+    def validate_security_settings(self):
+        """Validate security and configuration at startup."""
+        if self.app_env.lower() == "production":
+            if self.secret_key == "change_me":
+                raise ValueError("SECURITY RISK: SECRET_KEY must be set in production environment!")
+        if not self.mock_ai and not self.ai_configured:
+            import logging
+            logging.getLogger(__name__).warning(
+                "No AI API Key (GROQ_API_KEY, GEMINI_API_KEY, or NVIDIA_API_KEY) is configured. "
+                "Backend will use rule-based fallback extraction."
+            )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
-        extra = "ignore"   # silently ignore unknown env vars like old GEMINI_API_KEY
+        extra = "ignore"
 
 
     @property
@@ -68,4 +80,6 @@ class Settings(BaseSettings):
 
 @lru_cache()
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    settings.validate_security_settings()
+    return settings

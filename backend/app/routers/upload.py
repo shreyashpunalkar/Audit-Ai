@@ -41,21 +41,34 @@ async def upload_document(
         ext = Path(original_name).suffix.lower()
         raise UnsupportedFileTypeError(ext)
 
-    # Read file content to check size
-    content = await file.read()
-    size_bytes = len(content)
-
-    if not validate_file_size(size_bytes):
-        size_mb = size_bytes / (1024 * 1024)
-        raise FileTooLargeError(size_mb, settings.max_upload_size_mb)
-
-    # Generate safe filename and save
+    # Generate safe filename and target path
     safe_name = generate_safe_filename(original_name)
     file_path = get_upload_path(safe_name)
     file_type = get_file_type(original_name)
 
-    async with aiofiles.open(file_path, "wb") as f:
-        await f.write(content)
+    # Stream file in 1 MB chunks to prevent OOM memory exhaustion vulnerabilities
+    max_bytes = settings.max_upload_size_bytes
+    size_bytes = 0
+    chunk_size = 1024 * 1024  # 1 MB chunking
+
+    try:
+        async with aiofiles.open(file_path, "wb") as f:
+            while chunk := await file.read(chunk_size):
+                size_bytes += len(chunk)
+                if size_bytes > max_bytes:
+                    break
+                await f.write(chunk)
+
+        if size_bytes > max_bytes:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            size_mb = size_bytes / (1024 * 1024)
+            raise FileTooLargeError(size_mb, settings.max_upload_size_mb)
+
+    except Exception as e:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise e
 
     logger.info(f"Uploaded: {original_name} → {safe_name} ({size_bytes} bytes)")
 
