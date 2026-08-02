@@ -16,28 +16,17 @@ logger = logging.getLogger(__name__)
 def clean_and_deduplicate_text(text: str) -> str:
     """
     Clean extracted document text:
-    1. Fixes stuttered/duplicated syllables (e.g. 'unobobstructed' -> 'unobstructed').
-    2. Deduplicates repeated standalone words or consecutive identical lines.
-    3. Truncates excessive empty lines and trailing blank blocks.
+    Retains verbatim raw text, deduplicates consecutive identical blank lines.
     """
     if not text:
         return ""
 
-    # 1. Deduplicate repeated syllable patterns inside words (e.g. unobobstructed -> unobstructed)
-    text = re.sub(r'([a-zA-Z]{2,5})\1+', r'\1', text)
-
-    # 2. Deduplicate standalone repeated words (e.g. "table table")
-    text = re.sub(r'\b(\w+)\s+\1\b', r'\1', text, flags=re.IGNORECASE)
-
-    # 3. Line-level deduplication and fast boundary trimming
     lines = text.splitlines()
     cleaned_lines = []
-    prev_line = None
     empty_count = 0
 
     for line in lines:
         stripped = line.strip()
-
         if not stripped:
             empty_count += 1
             if empty_count <= 2:  # Retain max 2 consecutive blank lines
@@ -45,12 +34,6 @@ def clean_and_deduplicate_text(text: str) -> str:
             continue
 
         empty_count = 0
-
-        # Skip duplicate consecutive identical lines
-        if stripped == prev_line:
-            continue
-
-        prev_line = stripped
         cleaned_lines.append(line)
 
     return "\n".join(cleaned_lines).strip()
@@ -79,23 +62,27 @@ def extract_excel(file_path: str) -> str:
 
 def extract_pdf(file_path: str) -> str:
     try:
+        # pyrefly: ignore [missing-import]
         import pdfplumber
         parts = []
         with pdfplumber.open(file_path) as pdf:
             for page_num, page in enumerate(pdf.pages, 1):
                 parts.append(f"=== Page {page_num} ===")
+
+                # Always extract full page text so title, standard, version, description & section headers are preserved
+                text = page.extract_text()
+                if text:
+                    parts.append(text)
+
+                # Append structured tables if present
                 tables = page.extract_tables()
                 if tables:
+                    parts.append("\n--- Table Grid ---")
                     for tbl_idx, table in enumerate(tables, 1):
-                        parts.append(f"-- Table {tbl_idx} --")
                         for row in table:
-                            cleaned = [str(cell or "").strip() for cell in row if cell]
+                            cleaned = [str(cell or "").strip() for cell in row if cell is not None]
                             if cleaned:
                                 parts.append(" | ".join(cleaned))
-                else:
-                    text = page.extract_text()
-                    if text:
-                        parts.append(text)
         return clean_and_deduplicate_text("\n".join(parts))
     except Exception as e:
         logger.error(f"PDF extraction failed: {e}")
