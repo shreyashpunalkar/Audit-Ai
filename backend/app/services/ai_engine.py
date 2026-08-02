@@ -38,7 +38,13 @@ SYSTEM_PROMPT = """You are an expert Document Intelligence Lead and Lead QA Auto
 4. SCHEMA & STRUCTURAL PARITY CHECK:
    - All section names must match the exact document headings (e.g., "Section 1: Workstation Ergonomics", "Section 2: Bio-Safety Cabinet (BSC) Verification").
    - Calculate validation counts mathematically equal to the actual array lengths in "sections".
-   - Return ONLY valid JSON matching the exact schema below.
+
+5. HEADER METADATA SEPARATION:
+   - Extract document-level metadata (Standards, Audit IDs, Revisions) STRICTLY into template.standard and template.version.
+   - NEVER create table rows out of header/metadata key-value pairs (e.g., "Standard: OSHA-1910" is metadata, NOT a row).
+   - Strip document artifacts like "Sheet: " or "Form: " from template.title before generating template.id.
+
+Return ONLY valid JSON matching the exact schema below.
 
 SCHEMA FORMAT:
 {

@@ -74,11 +74,38 @@ def extract_pdf(file_path: str) -> str:
                 if text:
                     parts.append(text)
 
-                # Append structured tables if present
+                # Extract section headers with their Y positions for table boundary injection
+                section_headers = []
+                if page.chars:
+                    lines_by_top = {}
+                    for char in page.chars:
+                        top = round(char["top"], 1)
+                        lines_by_top.setdefault(top, []).append(char)
+                    for top in sorted(lines_by_top.keys()):
+                        line_text = "".join(c["text"] for c in sorted(lines_by_top[top], key=lambda c: c["x0"])).strip()
+                        if re.match(r"^Section\s+\d+", line_text, re.I):
+                            section_headers.append({"y": top, "text": line_text})
+
+                # Append structured tables with section separators
                 tables = page.extract_tables()
                 if tables:
                     parts.append("\n--- Table Grid ---")
-                    for tbl_idx, table in enumerate(tables, 1):
+
+                    # Get bounding boxes for each table to match with section headers
+                    table_bboxes = []
+                    for t in page.find_tables():
+                        table_bboxes.append(t.bbox)  # (x0, top, x1, bottom)
+
+                    for tbl_idx, table in enumerate(tables):
+                        # Check if a section header appears before this table's Y position
+                        if tbl_idx < len(table_bboxes) and section_headers:
+                            tbl_top = table_bboxes[tbl_idx][1]
+                            for sh in section_headers:
+                                if sh["y"] < tbl_top:
+                                    parts.append(f"\n{sh['text']}")
+                            # Remove used headers so they're not repeated
+                            section_headers = [sh for sh in section_headers if tbl_idx < len(table_bboxes) and sh["y"] >= table_bboxes[tbl_idx][1]]
+
                         for row in table:
                             cleaned = [" ".join(str(cell or "").split()) for cell in row if cell is not None]
                             if any(cleaned):

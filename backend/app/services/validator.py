@@ -6,6 +6,7 @@ Provides auto-correction of common formatting issues.
 """
 import json
 import logging
+import re
 from typing import Any
 
 from jsonschema import Draft7Validator, ValidationError, SchemaError
@@ -118,21 +119,6 @@ def auto_correct(data: dict) -> dict:
         total_checklist_items += num_rows
         if sec["headers"]:
             total_cols = max(total_cols, len(sec["headers"]))
-
-        # Auto-repair checkbox syntax in rows
-        repaired_rows = []
-        for row in sec["rows"]:
-            if isinstance(row, list):
-                repaired_cell_row = []
-                for cell in row:
-                    if isinstance(cell, str) and ("Pass" in cell or "Fail" in cell or "Yes" in cell or "No" in cell):
-                        cell = re.sub(r'\[\s*(Pass|Fail|Yes|No|NA)\b', r'[ ] \1', cell, flags=re.IGNORECASE)
-                        cell = re.sub(r'\[\]\s*(Pass|Fail|Yes|No|NA)\b', r'[ ] \1', cell, flags=re.IGNORECASE)
-                    repaired_cell_row.append(cell)
-                repaired_rows.append(repaired_cell_row)
-            else:
-                repaired_rows.append(row)
-        sec["rows"] = repaired_rows
 
     # Auto-correct Validation Counts
     val = data.get("validation")
