@@ -67,8 +67,8 @@ export default function Dashboard() {
       if (Date.now() - startTime > 60000) {
         clearInterval(pollRef.current)
         setStatus('error')
-        setErrorMsg('NVIDIA NIM API error: Request timed out.')
-        console.error('NVIDIA NIM API error: Request timed out after 60 seconds.')
+        setErrorMsg('AI Extraction timed out after 60 seconds. Please try again.')
+        console.error('AI extraction polling timed out after 60 seconds.')
         return
       }
 

@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    nvidia_model: str = "minimaxai/minimax-m2.7"
+    nvidia_model: str = "meta/llama-3.3-70b-instruct"
 
     groq_api_key: str = ""
     groq_base_url: str = "https://api.groq.com/openai/v1"
