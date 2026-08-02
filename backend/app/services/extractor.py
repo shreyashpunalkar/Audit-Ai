@@ -80,8 +80,8 @@ def extract_pdf(file_path: str) -> str:
                     parts.append("\n--- Table Grid ---")
                     for tbl_idx, table in enumerate(tables, 1):
                         for row in table:
-                            cleaned = [str(cell or "").strip() for cell in row if cell is not None]
-                            if cleaned:
+                            cleaned = [" ".join(str(cell or "").split()) for cell in row if cell is not None]
+                            if any(cleaned):
                                 parts.append(" | ".join(cleaned))
         return clean_and_deduplicate_text("\n".join(parts))
     except Exception as e:
