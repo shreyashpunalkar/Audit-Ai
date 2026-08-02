@@ -60,6 +60,7 @@ export default function Dashboard() {
   const startPolling = useCallback((id) => {
     if (pollRef.current) clearInterval(pollRef.current)
     let currentLoggedStage = 0
+    let retryCount = 0
     const startTime = Date.now()
 
     pollRef.current = setInterval(async () => {
@@ -74,6 +75,7 @@ export default function Dashboard() {
 
       try {
         const doc = await getDocument(id)
+        retryCount = 0 // reset on success
         setDocData(doc)
         setStatus(doc.status)
 
@@ -91,7 +93,6 @@ export default function Dashboard() {
         if (doc.status === 'completed' && currentLoggedStage < 3) {
           currentLoggedStage = 3
           try {
-            // Await required async functions inside try/catch blocks
             const result = await analyzeDocument(id)
             setProcessingStep("json-generation")
             
@@ -111,12 +112,18 @@ export default function Dashboard() {
 
         if (doc.status === 'completed' || doc.status === 'error') {
           clearInterval(pollRef.current)
-          if (doc.status === 'error') setErrorMsg(doc.error_message)
+          if (doc.status === 'error') setErrorMsg(doc.error_message || 'Document extraction failed during analysis.')
         }
       } catch (err) {
-        clearInterval(pollRef.current)
-        setStatus('error')
-        setErrorMsg('Failed to poll document status.')
+        retryCount += 1
+        console.warn(`Polling attempt ${retryCount} failed: ${err.message}`)
+        if (retryCount >= 5) {
+          clearInterval(pollRef.current)
+          setStatus('error')
+          setErrorMsg(
+            err?.response?.data?.message || err?.message || 'Failed to poll document status. Server unreachable.'
+          )
+        }
       }
     }, POLL_INTERVAL)
   }, [])
