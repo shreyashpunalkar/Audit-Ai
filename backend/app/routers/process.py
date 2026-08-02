@@ -87,7 +87,10 @@ async def process_document(
     now = datetime.now(timezone.utc)
     is_stuck = False
     if doc.updated_at:
-        delta = (now - doc.updated_at).total_seconds()
+        updated_at = doc.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        delta = (now - updated_at).total_seconds()
         if delta > 25:
             is_stuck = True
 
