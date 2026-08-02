@@ -103,15 +103,21 @@ def _is_valid_key(key: str) -> bool:
 
 def _get_providers() -> list[dict]:
     providers = []
-    # Priority 1: Groq (Sub-second speed on LPUs)
+    # Priority 1: Groq Instant (Sub-second speed on LPUs & high TPD capacity)
     if _is_valid_key(settings.groq_api_key):
+        groq_client = AsyncOpenAI(
+            base_url=settings.groq_base_url,
+            api_key=settings.groq_api_key,
+        )
         providers.append({
-            "name": "Groq",
-            "model": settings.groq_model,
-            "client": AsyncOpenAI(
-                base_url=settings.groq_base_url,
-                api_key=settings.groq_api_key,
-            ),
+            "name": "Groq Instant",
+            "model": "llama-3.1-8b-instant",
+            "client": groq_client,
+        })
+        providers.append({
+            "name": "Groq Versatile",
+            "model": "llama-3.3-70b-versatile",
+            "client": groq_client,
         })
     # Priority 2: Gemini
     if _is_valid_key(settings.gemini_api_key):
