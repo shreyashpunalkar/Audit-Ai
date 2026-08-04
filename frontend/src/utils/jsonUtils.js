@@ -66,14 +66,33 @@ export function getFileTypeIcon(fileType) {
   return map[fileType] || '📎'
 }
 
-/** Count checks in extracted JSON. */
+/** Count checks in extracted JSON — recursively counts questions in nested sections. */
 export function countChecks(json) {
   if (!json) return 0
-  if (Array.isArray(json.checks)) return json.checks.length
 
+  // com.audito.checksheet: recursively count questions through sections -> children/questions
+  function countQuestionsInSections(sections) {
+    let count = 0
+    if (!Array.isArray(sections)) return 0
+    for (const section of sections) {
+      if (!section) continue
+      if (Array.isArray(section.questions)) {
+        count += section.questions.length
+      }
+      if (Array.isArray(section.children)) {
+        count += countQuestionsInSections(section.children)
+      }
+    }
+    return count
+  }
+
+  if (json.template && Array.isArray(json.template.sections)) {
+    const qCount = countQuestionsInSections(json.template.sections)
+    if (qCount > 0) return qCount
+  }
+
+  // Legacy: count rows from table-style sections
   let count = 0
-
-  // Try counting template -> sections -> rows
   if (json.template && Array.isArray(json.template.sections)) {
     for (const section of json.template.sections) {
       if (section && Array.isArray(section.rows)) {
@@ -85,7 +104,7 @@ export function countChecks(json) {
     if (count > 0) return count
   }
 
-  // Try counting top-level sections -> rows
+  // Top-level sections (legacy)
   if (Array.isArray(json.sections)) {
     for (const section of json.sections) {
       if (section && Array.isArray(section.rows)) {
@@ -97,7 +116,7 @@ export function countChecks(json) {
     if (count > 0) return count
   }
 
-  // Fallback counting any sheets -> sections -> rows
+  // Sheets (legacy)
   if (Array.isArray(json.sheets)) {
     for (const sheet of json.sheets) {
       if (sheet && Array.isArray(sheet.sections)) {

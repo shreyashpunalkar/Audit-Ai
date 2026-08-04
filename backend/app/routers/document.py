@@ -111,7 +111,7 @@ async def download_json(
     base_name = os.path.splitext(doc.original_filename)[0]
     # Sanitize base_name to ensure standard ASCII compatibility for filename="..."
     safe_base = "".join(c if c.isalnum() or c in "._-" else "_" for c in base_name)
-    download_name = f"{safe_base}_extracted.json"
+    download_name = f"{safe_base}.audito.json"
 
     headers = {
         "Content-Disposition": f'attachment; filename="{download_name}"; filename*=utf-8\'\'{quote(download_name)}'

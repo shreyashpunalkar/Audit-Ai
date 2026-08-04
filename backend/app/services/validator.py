@@ -1,19 +1,42 @@
 """
 JSON schema validation service.
 
-Validates AI-generated JSON against a checksheet schema using jsonschema.
+Validates AI-generated JSON against the com.audito.checksheet schema using jsonschema.
 Provides auto-correction of common formatting issues.
 """
 import json
 import logging
 import re
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from jsonschema import Draft7Validator, ValidationError, SchemaError
 
 logger = logging.getLogger(__name__)
 
-# ─── Checksheet JSON Schema ───────────────────────────────────────────────────
+# ─── Constants ─────────────────────────────────────────────────────────────────
+
+DEFAULT_SCHEMA = "com.audito.checksheet"
+DEFAULT_SCHEMA_VERSION = "1.0.0"
+DEFAULT_APP_VERSION = "0.1.0"
+DEFAULT_STANDARD = "BEC 1500:2024"
+DEFAULT_VERSION = "1.0"
+DEFAULT_LIKERT_MIN = 0
+DEFAULT_LIKERT_MAX = 5
+DEFAULT_THRESHOLD = 3
+
+# The BEC 1500 six-point maturity scale (0..5) used as the default for all templates.
+DEFAULT_SCALE_POINTS = [
+    {"value": 0, "label": "Not Established/ Not Addressed", "guidance": "", "labelOverridden": False},
+    {"value": 1, "label": "Only Intent demonstrated(e.g. verbally indirectly)", "guidance": "", "labelOverridden": False},
+    {"value": 2, "label": "Policy/ Process evidence  Available, but implementation is not seen. ", "guidance": "", "labelOverridden": False},
+    {"value": 3, "label": "Fair Implementation (not complete) seen for the process along with the process/ policy definition in all areas, no communication to stakeholders such as suppliers. ", "guidance": "", "labelOverridden": False},
+    {"value": 4, "label": "Implementation seen for the process along with the process/ policy definition in all areas, with  communication to stakeholders such as suppliers. ", "guidance": "", "labelOverridden": False},
+    {"value": 5, "label": "Maturity seen in Implementation  (More than 12 months or across multiple verticals/ Departments) internally and communicated to Stakeholders and stakeholder participation also seen. ", "guidance": "", "labelOverridden": False},
+]
+
+# ─── Checksheet JSON Schema (com.audito.checksheet) ───────────────────────────
 
 CHECKSHEET_SCHEMA = {
     "$schema": "http://json-schema.org/draft-07/schema#",
@@ -36,14 +59,15 @@ CHECKSHEET_SCHEMA = {
                 "version": {"type": ["string", "null"]},
                 "description": {"type": ["string", "null"]},
                 "defaults": {"type": ["object", "null"]},
-                "sections": {"type": "array"}
+                "sections": {"type": "array"},
+                "sectionNumberingTypes": {"type": "array"},
             }
         }
     },
     "additionalProperties": True
 }
 
-# Pre-compile Draft7Validator once globally for maximum performance
+# Pre-compiled Draft7Validator once globally for maximum performance
 _COMPILED_VALIDATOR = Draft7Validator(CHECKSHEET_SCHEMA)
 
 
@@ -61,20 +85,139 @@ def _coerce_values(obj: Any) -> Any:
         return str(obj)
 
 
+def _fix_id_prefix(raw_id: str, prefix: str) -> str:
+    """Ensure an ID has the correct prefix. If missing or malformed, regenerate."""
+    if raw_id and isinstance(raw_id, str) and raw_id.startswith(prefix):
+        return raw_id
+    return f"{prefix}{uuid.uuid4()}"
+
+
+def _ensure_scale_points(min_val: int, max_val: int, existing: list | None = None) -> list[dict]:
+    """Ensure scale points cover the full range min..max.
+
+    When a full default 0..5 scale is needed and no source is provided, the BEC 1500
+    maturity labels are used.
+    """
+    default_map = {sp["value"]: sp for sp in DEFAULT_SCALE_POINTS}
+    points = []
+    existing_map = {}
+    if existing:
+        for sp in existing:
+            if isinstance(sp, dict) and "value" in sp:
+                existing_map[sp["value"]] = sp
+
+    for v in range(min_val, max_val + 1):
+        if v in existing_map:
+            sp = dict(existing_map[v])
+        else:
+            sp = dict(default_map.get(v, {"value": v, "label": "", "guidance": "", "labelOverridden": False}))
+        sp.setdefault("label", "")
+        sp.setdefault("guidance", "")
+        sp.setdefault("labelOverridden", False)
+        points.append(sp)
+    return points
+
+
+def _normalize_question(q: dict, defaults: dict) -> dict:
+    """Normalize a single question to the com.audito.checksheet format."""
+    if not isinstance(q, dict):
+        return None
+
+    q["id"] = _fix_id_prefix(q.get("id", ""), "question-")
+    q.setdefault("title", "")
+    q.setdefault("helpText", "")
+    q.setdefault("type", defaults.get("questionType", "likert_observation"))
+    q.setdefault("required", defaults.get("required", True))
+    q.setdefault("evidenceRequired", defaults.get("evidenceRequired", True))
+    q.setdefault("weight", defaults.get("weight", 1))
+    q.setdefault("threshold", defaults.get("threshold", DEFAULT_THRESHOLD))
+
+    # Normalize likert block (default 0-5 BEC scale)
+    likert = q.get("likert")
+    if not isinstance(likert, dict):
+        likert = {}
+
+    likert_min = likert.get("min", defaults.get("likertMin", DEFAULT_LIKERT_MIN))
+    likert_max = likert.get("max", defaults.get("likertMax", DEFAULT_LIKERT_MAX))
+    likert["min"] = likert_min
+    likert["max"] = likert_max
+
+    existing_sp = likert.get("scalePoints")
+    if isinstance(existing_sp, list) and existing_sp:
+        likert["scalePoints"] = _ensure_scale_points(likert_min, likert_max, existing_sp)
+    else:
+        # Try to take from defaults
+        defaults_sp = defaults.get("scalePoints")
+        if isinstance(defaults_sp, list) and defaults_sp:
+            likert["scalePoints"] = _ensure_scale_points(likert_min, likert_max, defaults_sp)
+        else:
+            likert["scalePoints"] = _ensure_scale_points(likert_min, likert_max)
+
+    q["likert"] = likert
+    return q
+
+
+def _normalize_section(sec: dict, defaults: dict, section_idx: int = 1) -> dict:
+    """Recursively normalize a section and its children/questions."""
+    if not isinstance(sec, dict):
+        return None
+
+    sec["id"] = _fix_id_prefix(sec.get("id", ""), "section-")
+    sec.setdefault("code", "")
+    sec.setdefault("title", f"Section {section_idx}")
+    sec.setdefault("description", "")
+    sec.setdefault("weight", 1)
+
+    # Normalize children recursively
+    children = sec.get("children")
+    if not isinstance(children, list):
+        children = []
+    normalized_children = []
+    for ci, child in enumerate(children, 1):
+        normalized = _normalize_section(child, defaults, ci)
+        if normalized:
+            normalized_children.append(normalized)
+    sec["children"] = normalized_children
+
+    # Normalize questions
+    questions = sec.get("questions")
+    if not isinstance(questions, list):
+        questions = []
+    normalized_questions = []
+    for q in questions:
+        normalized = _normalize_question(q, defaults)
+        if normalized:
+            normalized_questions.append(normalized)
+    sec["questions"] = normalized_questions
+
+    return sec
+
+
 def auto_correct(data: dict) -> dict:
     """
     Apply auto-corrections to common AI output formatting issues.
+    Ensures output matches the com.audito.checksheet format exactly.
     """
     data = _coerce_values(data)
 
     if not isinstance(data, dict):
         data = {}
 
-    data.setdefault("schema", "https://auditai.com/schemas/checksheet.json")
-    data.setdefault("schemaVersion", "1.0")
-    data.setdefault("exportedAt", None)
-    data.setdefault("savedAt", None)
-    data.setdefault("appVersion", "1.0")
+    # Remove validation block (should not be in com.audito.checksheet output)
+    data.pop("validation", None)
+
+    # Set correct schema constants
+    data.setdefault("schema", DEFAULT_SCHEMA)
+    data.setdefault("schemaVersion", DEFAULT_SCHEMA_VERSION)
+    data.setdefault("appVersion", DEFAULT_APP_VERSION)
+
+    # Fill timestamps if null
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + \
+        f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
+    if not data.get("exportedAt"):
+        data["exportedAt"] = now_iso
+    if not data.get("savedAt"):
+        data["savedAt"] = now_iso
 
     # Ensure template object exists and is valid
     if "template" not in data or not isinstance(data["template"], dict):
@@ -86,58 +229,66 @@ def auto_correct(data: dict) -> dict:
     if not tmpl.get("title"):
         tmpl["title"] = "Checksheet Document"
 
-    # Auto-correct ID
-    if not tmpl.get("id"):
-        tmpl["id"] = re.sub(r"[^\w]+", "-", tmpl["title"].lower()).strip("-") or "checksheet-document"
+    # Auto-correct ID (ensure template- prefix)
+    tmpl["id"] = _fix_id_prefix(tmpl.get("id", ""), "template-")
 
-    tmpl.setdefault("standard", None)
-    tmpl.setdefault("version", None)
+    # Default metadata to the BEC 1500 template values if missing/null
+    if not tmpl.get("standard"):
+        tmpl["standard"] = DEFAULT_STANDARD
+    if not tmpl.get("version"):
+        tmpl["version"] = DEFAULT_VERSION
     tmpl.setdefault("description", None)
-    tmpl.setdefault("defaults", None)
 
-    # Auto-correct Sections
-    if "sections" not in tmpl or not isinstance(tmpl["sections"], list):
-        tmpl["sections"] = []
+    # Ensure sectionNumberingTypes
+    if "sectionNumberingTypes" not in tmpl or not isinstance(tmpl["sectionNumberingTypes"], list):
+        tmpl["sectionNumberingTypes"] = [
+            "numeric", "upper_alpha", "lower_alpha", "lower_roman", "upper_roman"
+        ]
 
-    total_rows = 0
-    total_cols = 0
-    total_checklist_items = 0
+    # Ensure defaults exist (default 0-5 BEC scale)
+    defaults = tmpl.get("defaults")
+    if not isinstance(defaults, dict):
+        defaults = {
+            "questionType": "likert_observation",
+            "likertMin": DEFAULT_LIKERT_MIN,
+            "likertMax": DEFAULT_LIKERT_MAX,
+            "required": True,
+            "evidenceRequired": True,
+            "weight": 1,
+            "threshold": DEFAULT_THRESHOLD,
+            "scalePoints": _ensure_scale_points(DEFAULT_LIKERT_MIN, DEFAULT_LIKERT_MAX),
+        }
+    else:
+        defaults.setdefault("questionType", "likert_observation")
+        defaults.setdefault("likertMin", DEFAULT_LIKERT_MIN)
+        defaults.setdefault("likertMax", DEFAULT_LIKERT_MAX)
+        defaults.setdefault("required", True)
+        defaults.setdefault("evidenceRequired", True)
+        defaults.setdefault("weight", 1)
+        defaults.setdefault("threshold", DEFAULT_THRESHOLD)
+        likert_min = defaults.get("likertMin", DEFAULT_LIKERT_MIN)
+        likert_max = defaults.get("likertMax", DEFAULT_LIKERT_MAX)
+        existing_sp = defaults.get("scalePoints")
+        if not isinstance(existing_sp, list) or not existing_sp:
+            defaults["scalePoints"] = _ensure_scale_points(likert_min, likert_max)
+        else:
+            defaults["scalePoints"] = _ensure_scale_points(likert_min, likert_max, existing_sp)
 
-    for idx, sec in enumerate(tmpl["sections"], 1):
-        if not isinstance(sec, dict):
-            continue
-        sec.setdefault("section_type", "table")
-        if not sec.get("section_name"):
-            sec["section_name"] = f"Section {idx}"
-        if "headers" not in sec or not isinstance(sec["headers"], list):
-            sec["headers"] = []
-        if "rows" not in sec or not isinstance(sec["rows"], list):
-            sec["rows"] = []
+    tmpl["defaults"] = defaults
 
-        num_rows = len(sec["rows"])
-        total_rows += num_rows
-        total_checklist_items += num_rows
-        if sec["headers"]:
-            total_cols = max(total_cols, len(sec["headers"]))
+    # Normalize sections recursively
+    sections = tmpl.get("sections")
+    if not isinstance(sections, list):
+        sections = []
 
-    # Auto-correct Validation Counts
-    val = data.get("validation")
-    if not isinstance(val, dict):
-        val = {}
+    normalized_sections = []
+    for idx, sec in enumerate(sections, 1):
+        normalized = _normalize_section(sec, defaults, idx)
+        if normalized:
+            normalized_sections.append(normalized)
 
-    num_secs = len(tmpl["sections"])
-    val["sheets_detected"] = val.get("sheets_detected") or 1
-    val["sheets_extracted"] = val.get("sheets_extracted") or 1
-    val["sections_detected"] = num_secs
-    val["sections_extracted"] = num_secs
-    val["rows_detected"] = total_rows
-    val["rows_extracted"] = total_rows
-    val["columns_detected"] = total_cols or 4
-    val["columns_extracted"] = total_cols or 4
-    val["checklist_items_detected"] = total_checklist_items
-    val["checklist_items_extracted"] = total_checklist_items
+    tmpl["sections"] = normalized_sections
 
-    data["validation"] = val
     return data
 
 
