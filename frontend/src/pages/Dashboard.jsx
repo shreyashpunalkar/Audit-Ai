@@ -114,6 +114,14 @@ export default function Dashboard() {
           if (doc.status === 'error') setErrorMsg(doc.error_message)
         }
       } catch (err) {
+        // Vercel serverless instances have ephemeral /tmp storage, so a 404
+        // during polling just means this poll hit a different instance than the
+        // one that processed the file. The background task still completes on
+        // its own instance — keep polling instead of failing on the first miss.
+        if (err.response && err.response.status === 404) {
+          console.warn('Poll 404 (different serverless instance) — retrying…')
+          return
+        }
         clearInterval(pollRef.current)
         setStatus('error')
         setErrorMsg('Failed to poll document status.')
