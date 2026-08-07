@@ -50,7 +50,7 @@ def extract_excel(file_path: str) -> str:
             df = xl.parse(sheet_name)
             df = df.dropna(how="all").dropna(how="all", axis=1).fillna("")
             if not df.empty:
-                parts.append(f"Sheet: {sheet_name}")
+                parts.append(sheet_name)
                 # Pipe-separated format for consistent AI parsing
                 headers = [str(c) for c in df.columns]
                 parts.append(" | ".join(headers))
