@@ -50,8 +50,12 @@ def extract_excel(file_path: str) -> str:
             df = xl.parse(sheet_name)
             df = df.dropna(how="all").dropna(how="all", axis=1).fillna("")
             if not df.empty:
-                parts.append(f"=== Sheet: {sheet_name} ===")
-                parts.append(df.to_string(index=False))
+                parts.append(f"Sheet: {sheet_name}")
+                # Pipe-separated format for consistent AI parsing
+                headers = [str(c) for c in df.columns]
+                parts.append(" | ".join(headers))
+                for _, row in df.iterrows():
+                    parts.append(" | ".join(str(v) for v in row.values))
         return clean_and_deduplicate_text("\n\n".join(parts))
     except Exception as e:
         logger.error(f"Excel extraction failed: {e}")
@@ -67,8 +71,6 @@ def extract_pdf(file_path: str) -> str:
         parts = []
         with pdfplumber.open(file_path) as pdf:
             for page_num, page in enumerate(pdf.pages, 1):
-                parts.append(f"=== Page {page_num} ===")
-
                 # Always extract full page text so title, standard, version, description & section headers are preserved
                 text = page.extract_text()
                 if text:
@@ -89,8 +91,6 @@ def extract_pdf(file_path: str) -> str:
                 # Append structured tables with section separators
                 tables = page.extract_tables()
                 if tables:
-                    parts.append("\n--- Table Grid ---")
-
                     # Get bounding boxes for each table to match with section headers
                     table_bboxes = []
                     for t in page.find_tables():

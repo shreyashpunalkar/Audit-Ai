@@ -50,3 +50,5 @@ Thumbs.db
 # DB
 *.sqlite
 *.db
+.vercel
+.env*
