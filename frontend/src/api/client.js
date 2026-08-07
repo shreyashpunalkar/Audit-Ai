@@ -17,6 +17,16 @@ const api = axios.create({
   timeout: 120000, // 2 min for AI processing
 })
 
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response && error.response.status === 413) {
+      error.message = 'File is too large for the current Vercel deployment limit (max 4.5MB).'
+    }
+    return Promise.reject(error)
+  }
+)
+
 // ─── Upload ─────────────────────────────────────────────────────────────────
 
 export async function uploadDocument(file, onProgress) {
@@ -75,3 +85,4 @@ export async function healthCheck() {
 }
 
 export default api
+

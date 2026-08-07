@@ -223,7 +223,7 @@ export default function Dashboard() {
               <div>
                 <h2>Upload Checksheet</h2>
                 <p className="section__subtitle">
-                  Supports Excel, PDF, and Word documents up to 25 MB
+                  Supports Excel, PDF, and Word documents up to 4.4 MB
                 </p>
               </div>
               {file && !isProcessing && (
@@ -555,3 +555,4 @@ export default function Dashboard() {
     </div>
   )
 }
+

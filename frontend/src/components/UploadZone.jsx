@@ -10,7 +10,7 @@ const ALLOWED_TYPES = {
 }
 
 const ALLOWED_EXTS = ['.xlsx', '.xls', '.pdf', '.docx']
-const MAX_SIZE = 25 * 1024 * 1024
+const MAX_SIZE = 4.4 * 1024 * 1024 // 4.4 MB Vercel Serverless hard limit
 
 const FILE_TYPE_ICONS = {
   excel: <Table size={20} color="#22c55e" />,
@@ -24,7 +24,7 @@ function validateFile(file) {
     return `Unsupported file type "${ext}". Allowed: ${ALLOWED_EXTS.join(', ')}`
   }
   if (file.size > MAX_SIZE) {
-    return `File is too large (${formatBytes(file.size)}). Maximum is 25 MB.`
+    return `File is too large (${formatBytes(file.size)}). Maximum is 4.4 MB.`
   }
   return null
 }
@@ -109,7 +109,7 @@ export default function UploadZone({ onFileSelected, disabled }) {
                 </span>
               ))}
             </div>
-            <p className="upload-zone__limit">Maximum file size: 25 MB</p>
+            <p className="upload-zone__limit">Maximum file size: 4.4 MB</p>
           </div>
         ) : (
           <div className="upload-zone__selected">
@@ -264,3 +264,4 @@ export default function UploadZone({ onFileSelected, disabled }) {
     </div>
   )
 }
+

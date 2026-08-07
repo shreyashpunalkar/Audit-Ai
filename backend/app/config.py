@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://localhost:5173,http://localhost:3000"
 
     # Upload
-    max_upload_size_mb: int = 25
+    max_upload_size_mb: int = 4 # Vercel Serverless body limit
     upload_dir: str = "./uploads"
 
     # Allowed mime types
@@ -83,3 +83,4 @@ def get_settings() -> Settings:
     settings = Settings()
     settings.validate_security_settings()
     return settings
+
