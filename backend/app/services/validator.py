@@ -20,8 +20,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_SCHEMA = "com.audito.checksheet"
 DEFAULT_SCHEMA_VERSION = "1.0.0"
 DEFAULT_APP_VERSION = "0.1.0"
-DEFAULT_STANDARD = "BEC 1500:2024"
-DEFAULT_VERSION = "1.0"
+# These must come from the document only. Do not fabricate a standard or version.
+DEFAULT_STANDARD = None
+DEFAULT_VERSION = None
 DEFAULT_LIKERT_MIN = 0
 DEFAULT_LIKERT_MAX = 5
 DEFAULT_THRESHOLD = 3
@@ -232,11 +233,9 @@ def auto_correct(data: dict) -> dict:
     # Auto-correct ID (ensure template- prefix)
     tmpl["id"] = _fix_id_prefix(tmpl.get("id", ""), "template-")
 
-    # Default metadata to the BEC 1500 template values if missing/null
-    if not tmpl.get("standard"):
-        tmpl["standard"] = DEFAULT_STANDARD
-    if not tmpl.get("version"):
-        tmpl["version"] = DEFAULT_VERSION
+    # Standard / version come from the document only — never fabricate them
+    tmpl.setdefault("standard", None)
+    tmpl.setdefault("version", None)
     tmpl.setdefault("description", None)
 
     # Ensure sectionNumberingTypes
@@ -318,7 +317,45 @@ def validate_checksheet_json(data: dict) -> tuple[dict, list[str]]:
     except Exception as e:
         errors.append(f"Unexpected validation error: {str(e)}")
 
+    # Step 3: Content-quality checks
+    tpl = corrected.get("template") or {}
+    sections = tpl.get("sections") or []
+    q_count = sum(len(s.get("questions") or []) for s in sections)
+    if q_count == 0:
+        errors.append("Quality: no questions were extracted from the document.")
+
+    title = (tpl.get("title") or "").strip()
+    if not title:
+        errors.append("Quality: missing template title.")
+    elif re.search(r"\||--\s*table|===\s*page|sheet\s*[:]|form\s*[:]|^\s*Section\s*\d", title, re.I):
+        errors.append(f"Quality: title looks like an extraction artifact: {title!r}")
+
+    dupes = _find_duplicate_questions(sections)
+    if dupes:
+        errors.append(f"Quality: {len(dupes)} duplicate question title(s).")
+
+    cr = corrected.get("checkResults") or []
+    if isinstance(cr, list) and cr:
+        valid_ids = {q["id"] for s in sections for q in s.get("questions") or []}
+        bad = [r.get("questionId") for r in cr if r.get("questionId") not in valid_ids]
+        if bad:
+            errors.append(f"Quality: {len(bad)} checkResult(s) reference unknown question IDs.")
+
     return corrected, errors
+
+
+def _find_duplicate_questions(sections: list) -> list[str]:
+    """Return a list of duplicate question titles (lowercased, first-80-chars key)."""
+    seen = {}
+    dupes = []
+    for sec in sections:
+        for q in sec.get("questions") or []:
+            key = (q.get("title") or "")[:80].lower()
+            if key in seen:
+                dupes.append(key)
+            else:
+                seen[key] = True
+    return dupes
 
 
 def serialize_json(data: dict) -> str:

@@ -47,15 +47,25 @@ def extract_excel(file_path: str) -> str:
         xl = pd.ExcelFile(file_path)
         parts = []
         for sheet_name in xl.sheet_names:
-            df = xl.parse(sheet_name)
-            df = df.dropna(how="all").dropna(how="all", axis=1).fillna("")
-            if not df.empty:
-                parts.append(sheet_name)
-                # Pipe-separated format for consistent AI parsing
-                headers = [str(c) for c in df.columns]
-                parts.append(" | ".join(headers))
-                for _, row in df.iterrows():
-                    parts.append(" | ".join(str(v) for v in row.values))
+            # header=None: do NOT treat row 1 as pandas column names (that produced
+            # "Unnamed: N" header lines) and do NOT prepend the sheet tab name as the
+            # document title. The document's own title row becomes the first line.
+            df = xl.parse(sheet_name, header=None)
+            df = df.dropna(how="all").fillna("")
+            if df.empty:
+                continue
+            # First non-empty row is usually the merged title row -> emit it verbatim.
+            title_cells = [str(c) for c in df.iloc[0].values if str(c).strip()]
+            if title_cells:
+                parts.append(" | ".join(title_cells))
+            # Remaining rows: pipe-separated, preserving internal empty cells but
+            # trimming trailing empties so rows stay clean for the parser.
+            for _, row in df.iloc[1:].iterrows():
+                cells = [str(v) for v in row.values]
+                while cells and not cells[-1].strip():
+                    cells.pop()
+                if any(c.strip() for c in cells):
+                    parts.append(" | ".join(cells))
         return clean_and_deduplicate_text("\n\n".join(parts))
     except Exception as e:
         logger.error(f"Excel extraction failed: {e}")
@@ -70,46 +80,48 @@ def extract_pdf(file_path: str) -> str:
         import pdfplumber
         parts = []
         with pdfplumber.open(file_path) as pdf:
-            for page_num, page in enumerate(pdf.pages, 1):
-                # Always extract full page text so title, standard, version, description & section headers are preserved
-                text = page.extract_text()
-                if text:
-                    parts.append(text)
+            for page in pdf.pages:
+                tables = page.find_tables()
+                table_spans = [(t.bbox[1], t.bbox[3]) for t in tables]  # (top, bottom)
 
-                # Extract section headers with their Y positions for table boundary injection
-                section_headers = []
-                if page.chars:
-                    lines_by_top = {}
-                    for char in page.chars:
-                        top = round(char["top"], 1)
-                        lines_by_top.setdefault(top, []).append(char)
-                    for top in sorted(lines_by_top.keys()):
-                        line_text = "".join(c["text"] for c in sorted(lines_by_top[top], key=lambda c: c["x0"])).strip()
-                        if re.match(r"^Section\s+\d+", line_text, re.I):
-                            section_headers.append({"y": top, "text": line_text})
+                # Non-table text only, tagged with their y-position so the two
+                # passes below can be interleaved in true reading order.
+                text_lines = []
+                for line in page.extract_text_lines() or []:
+                    top = line.get("top", 0)
+                    if any(top >= t0 - 3 and top <= t1 + 3 for (t0, t1) in table_spans):
+                        # Inside a table bbox — skip free-text copies; the clean
+                        # pipe rows are emitted from extract_tables() below.
+                        continue
+                    text = (line.get("text") or "").strip()
+                    if text:
+                        text_lines.append((top, text))
 
-                # Append structured tables with section separators
-                tables = page.extract_tables()
-                if tables:
-                    # Get bounding boxes for each table to match with section headers
-                    table_bboxes = []
-                    for t in page.find_tables():
-                        table_bboxes.append(t.bbox)  # (x0, top, x1, bottom)
+                # Structured tables as (top, rows) — pipe rows preserve empty
+                # cells so column positions stay aligned for question/result/remark
+                # mapping. Reuse the find_tables() result so we also know each
+                # table's y-position for the interleave below.
+                table_items = []
+                for table in tables:
+                    rows = []
+                    for row in table.extract() or []:
+                        cells = ["" if cell is None else " ".join(str(cell).split()) for cell in row]
+                        if any(c for c in cells):
+                            rows.append(" | ".join(cells))
+                    if rows:
+                        table_items.append((table.bbox[1], rows))
 
-                    for tbl_idx, table in enumerate(tables):
-                        # Check if a section header appears before this table's Y position
-                        if tbl_idx < len(table_bboxes) and section_headers:
-                            tbl_top = table_bboxes[tbl_idx][1]
-                            for sh in section_headers:
-                                if sh["y"] < tbl_top:
-                                    parts.append(f"\n{sh['text']}")
-                            # Remove used headers so they're not repeated
-                            section_headers = [sh for sh in section_headers if tbl_idx < len(table_bboxes) and sh["y"] >= table_bboxes[tbl_idx][1]]
-
-                        for row in table:
-                            cleaned = [" ".join(str(cell or "").split()) for cell in row if cell is not None]
-                            if any(cleaned):
-                                parts.append(" | ".join(cleaned))
+                # Interleave by y-position: a category label printed just above its
+                # table must appear immediately before that table's rows, otherwise
+                # the parser cannot group rows under their section heading.
+                items = [(top, "text", t) for top, t in text_lines]
+                items += [(top, "table", rs) for top, rs in table_items]
+                items.sort(key=lambda it: it[0])
+                for _, kind, payload in items:
+                    if kind == "text":
+                        parts.append(payload)
+                    else:
+                        parts.extend(payload)
         return clean_and_deduplicate_text("\n".join(parts))
     except Exception as e:
         logger.error(f"PDF extraction failed: {e}")
@@ -121,20 +133,34 @@ def extract_pdf(file_path: str) -> str:
 def extract_docx(file_path: str) -> str:
     try:
         from docx import Document
+        from docx.table import Table as _DocxTable
+        from docx.text.paragraph import Paragraph as _DocxParagraph
+        from docx.oxml.ns import qn
         doc = Document(file_path)
         parts = []
 
-        for para in doc.paragraphs:
-            txt = para.text.strip()
-            if txt:
-                parts.append(txt)
-
-        for tbl_idx, table in enumerate(doc.tables, 1):
-            parts.append(f"\n-- Table {tbl_idx} --")
-            for row in table.rows:
-                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                if cells:
-                    parts.append(" | ".join(cells))
+        # Iterate the body in document order so section headings interleave with
+        # their tables (previously all paragraphs came first, then all tables,
+        # which made it impossible to group rows under their headings).
+        for child in doc.element.body.iterchildren():
+            if child.tag == qn("w:p"):
+                p = _DocxParagraph(child, doc)
+                txt = p.text.strip()
+                if txt:
+                    parts.append(txt)
+            elif child.tag == qn("w:tbl"):
+                t = _DocxTable(child, doc)
+                for row in t.rows:
+                    cells = []
+                    for cell in row.cells:
+                        cell_txt = cell.text.strip()
+                        cells.append(cell_txt)
+                    # Keep internal empty cells (keeps column alignment for result /
+                    # remark) but trim trailing empties.
+                    while cells and not cells[-1]:
+                        cells.pop()
+                    if any(cells):
+                        parts.append(" | ".join(cells))
 
         return clean_and_deduplicate_text("\n".join(parts))
     except Exception as e:

@@ -22,8 +22,10 @@ settings = get_settings()
 DEFAULT_SCHEMA = "com.audito.checksheet"
 DEFAULT_SCHEMA_VERSION = "1.0.0"
 DEFAULT_APP_VERSION = "0.1.0"
-DEFAULT_STANDARD = "BEC 1500:2024"
-DEFAULT_VERSION = "1.0"
+# Standard / version must come from the document ONLY. Never fabricate a standard
+# code (this previously hallucinated "BEC 1500:2024" into every output).
+DEFAULT_STANDARD = None
+DEFAULT_VERSION = None
 DEFAULT_LIKERT_MIN = 0
 DEFAULT_LIKERT_MAX = 5
 DEFAULT_THRESHOLD = 3
@@ -61,7 +63,7 @@ SYSTEM_PROMPT = """You are an expert Document Intelligence Lead. Convert checksh
 
 --- 1. TITLE & METADATA ---
 - TITLE: template.title must be the main document heading, verbatim. STRIP extraction artifacts from the title: a leading "Sheet:", "Form:", "=== Page N ===", "-- Table N --", or dash/equals/hash decoration. NEVER use "Page 1", "Sheet: ...", "Table 1", or a section marker as the title.
-- standard / version: read from metadata lines such as "Standard: X" or "Version: X". If absent, standard = "BEC 1500:2024", version = "1.0".
+- standard / version: read ONLY from metadata lines such as "Standard: X" or "Version: X". If the document does NOT state a standard or version, set standard = null and version = null. NEVER invent, guess, or default a standard code or version number.
 - description: an intro paragraph if present, otherwise null.
 
 --- 2. QUESTIONS (MOST IMPORTANT RULE) ---
@@ -84,7 +86,15 @@ SYSTEM_PROMPT = """You are an expert Document Intelligence Lead. Convert checksh
 - Copy the SAME six scalePoints verbatim into EVERY question's likert.scalePoints. Every question: likert.min = 0, likert.max = 5, threshold = 3, type = "likert_observation", required = true, evidenceRequired = true, weight = 1.
 - If the document explicitly defines its own rating labels, use those instead (still six points 0-5).
 
---- SCHEMA FORMAT ---
+--- 5. CHECK RESULTS & METADATA ---
+- If the document has a per-item result column (headed e.g. Result / Status / Score / Outcome / Verdict) and/or a remarks/comments column, ALSO emit a top-level "checkResults" array with EXACTLY ONE entry per question, in the same order as the questions:
+  {"questionId": "<id of the matching question>", "result": "<verbatim result value or null>", "remark": "<verbatim remark value or null>"}
+- Copy result and remark values VERBATIM (e.g. "Pass", "Fail", "NA", "4", "Compliant"). Leave a field null when the document has no value there.
+- If the document has no per-item results, emit "checkResults": [].
+- Also emit a top-level "metadata" object capturing header/field values found in the document (e.g. Auditor, Date, Site / Area, Line, Machine ID, Product, Reference, Dept, Shift, Technician, Audit Type). Include ONLY keys actually present; never invent values.
+
+--- 6. SECTIONS (PRESERVE STRUCTURE) ---
+- Keep the document's own heading hierarchy. Each named category/section heading from the document becomes its OWN top-level section titled verbatim. Do NOT flatten everything into one "Section 1" when the document has named headings.
 {
   "schema": "com.audito.checksheet",
   "schemaVersion": "1.0.0",
@@ -94,8 +104,8 @@ SYSTEM_PROMPT = """You are an expert Document Intelligence Lead. Convert checksh
   "template": {
     "id": "template-<uuid4>",
     "title": "Exact Main Heading from Document",
-    "standard": "BEC 1500:2024",
-    "version": "1.0",
+    "standard": null,
+    "version": null,
     "description": null,
     "defaults": {
       "questionType": "likert_observation",
@@ -149,6 +159,17 @@ SYSTEM_PROMPT = """You are an expert Document Intelligence Lead. Convert checksh
       }
     ],
     "sectionNumberingTypes": ["numeric", "upper_alpha", "lower_alpha", "lower_roman", "upper_roman"]
+  },
+  "checkResults": [
+    {
+      "questionId": "question-<uuid4>",
+      "result": "Pass",
+      "remark": null
+    }
+  ],
+  "metadata": {
+    "Audit Type": "Safety",
+    "Site / Area": "Production Line A"
   }
 }
 
@@ -157,6 +178,9 @@ IMPORTANT RULES:
 - exportedAt and savedAt must be null (the system fills them).
 - template.defaults.scalePoints is the six-point BEC 1500 scale shown above.
 - Every question's likert.scalePoints must be the identical six-point scale, copied verbatim.
+- standard and version are null unless explicitly stated in the document.
+- "checkResults" and "metadata" are OPTIONAL top-level keys: include them exactly as described in Section 5, with one checkResults entry per question when results exist.
+- Preserve section headings verbatim from the document (Section 6).
 - Do NOT include a "validation", "section_type", "section_name", "headers", or "rows" key.
 - Return ONLY the JSON object, no commentary."""
 
@@ -271,10 +295,35 @@ def _count_questions(template_json) -> int:
 
 
 _HEADER_WORD_RE = re.compile(
-    r"^(control|requirement|maturity|evidence|section|status|check|question|id|score|"
-    r"weight|remarks?|column|criteria|audit|observation|metric)\b",
+    r"^(no\.?|item|control|requirement|maturity|evidence|section|status|check|question|id|score|"
+    r"weight|remarks?|column|criterion|criteria|result|outcome|verdict|audit|observation|metric)\b",
     re.I,
 )
+
+# Metadata field labels. These appear in checksheet headers ("Audit Type: Safety",
+# "Site / Area | Production Line A", "Standard | BEC 1500:2024") and must be
+# captured as metadata instead of leaking into questions.
+_META_KEY_RE = re.compile(
+    r"^(standard|version|description|title|document\s*title|check\s*sheet|sheet\s*type|"
+    r"auditor|audited\s*by|audit\s*type|audit\s*date|date|purpose|site(\s*/\s*area)?|area|"
+    r"line|machine(\s*id)?|department|dept|technician|shift|product|reference|"
+    r"form(\s*no\.?)?|doc(ument)?(\s*no\.?)?)$",
+    re.I,
+)
+
+
+def _is_meta_key(key) -> bool:
+    """True when a header cell looks like a metadata field name (optionally with colon)."""
+    k = (key or "").strip().rstrip(":").strip().lower()
+    return bool(k) and bool(_META_KEY_RE.match(k))
+
+
+def _is_meta_row(line: str) -> bool:
+    """True when a line is a metadata row (colon or pipe-separated key/value pairs)."""
+    parts = [p.strip() for p in re.split(r"[|;]", line) if p.strip()]
+    if not parts:
+        return False
+    return _is_meta_key(parts[0].rstrip(":").strip())
 
 
 def _is_header_row(cells) -> bool:
@@ -283,6 +332,67 @@ def _is_header_row(cells) -> bool:
     if not meaningful:
         return False
     return all(_HEADER_WORD_RE.match(c) for c in meaningful)
+
+
+# Patterns for mapping header cells to column roles (question / result / remark)
+_HEADER_COL_Q_RE = re.compile(
+    r"^(control|requirement|check|question|description|criterion|criteria|item|audit|observation)", re.I
+)
+_HEADER_COL_RESULT_RE = re.compile(
+    r"^(result|status|score|outcome|verdict|complian)", re.I
+)
+_HEADER_COL_REMARK_RE = re.compile(
+    r"^(remark|comment|note|action)", re.I
+)
+_RESULT_TOKEN_RE = re.compile(
+    r"^(pass|fail|na|n/a|yes|no|ok|compliant|non[ -]?compliant|met|not\s*met|conform|non[ -]?conform|open|closed|acceptable|reject|partial)\b",
+    re.I,
+)
+
+
+def _map_header_columns(cells) -> dict:
+    """Map header cells to (q, result, remark) column indices. -1 = not found."""
+    mapping = {"q": -1, "result": -1, "remark": -1}
+    for i, c in enumerate(cells):
+        c = c.strip(" .").lower()
+        if re.fullmatch(r"(no|s\.?no|sr|sn|#)", c):
+            continue
+        if mapping["result"] == -1 and _HEADER_COL_RESULT_RE.match(c):
+            mapping["result"] = i
+        elif mapping["remark"] == -1 and _HEADER_COL_REMARK_RE.match(c):
+            mapping["remark"] = i
+        elif mapping["q"] == -1 and _HEADER_COL_Q_RE.match(c):
+            mapping["q"] = i
+    return mapping
+
+
+def _parse_data_row(cells, mapping) -> tuple:
+    """Return (title, result, remark) for a data row using the header column mapping."""
+    title = result = remark = None
+
+    if mapping["q"] != -1 and mapping["q"] < len(cells):
+        cand = cells[mapping["q"]].strip()
+        if len(cand) >= 2 and not re.fullmatch(r"[0-9.,%\-/: ]+", cand):
+            title = cand
+    if title is None:
+        title = _pick_question_cell(cells)
+
+    if mapping["result"] != -1 and mapping["result"] < len(cells):
+        result = cells[mapping["result"]].strip() or None
+    elif title:
+        for c in reversed(cells):
+            if _RESULT_TOKEN_RE.match(c.strip()):
+                result = c.strip()
+                break
+
+    if mapping["remark"] != -1 and mapping["remark"] < len(cells):
+        remark = cells[mapping["remark"]].strip() or None
+    elif result is not None and mapping["result"] != -1 and mapping["result"] + 1 < len(cells):
+        rem = cells[mapping["result"] + 1].strip()
+        if rem and rem != result:
+            remark = rem
+
+    return title, result, remark
 
 
 def _pick_question_cell(cells):
@@ -298,7 +408,24 @@ def _pick_question_cell(cells):
             continue  # numeric / rating cell
         if best is None or len(c) > len(best):
             best = c
-    return best
+    if best is not None:
+        return best
+    # Fallback for short/code rows (e.g. "C0-0 | Pending"): pick the first cell
+    # that is not purely numeric, not a result token, and not a metadata key.
+    for c in cells:
+        c = c.strip()
+        if not c:
+            continue
+        if re.fullmatch(r"[0-9.,%\-/: ]+", c):
+            continue
+        if _RESULT_TOKEN_RE.match(c):
+            continue
+        if _is_meta_key(c):
+            continue
+        if _HEADER_WORD_RE.match(c) and len(c) < 20:
+            continue
+        return c
+    return None
 
 
 def _extract_title(lines) -> str:
@@ -307,9 +434,11 @@ def _extract_title(lines) -> str:
         s = l.strip()
         if not s:
             continue
-        if re.match(r"^(standard|version|description|title|auditor|date|purpose)\s*[:|]", s, re.I):
+        if _is_meta_row(s):
             continue
         if re.match(r"^section\s+\d+", s, re.I):
+            continue
+        if re.match(r"^page\s+\d+", s, re.I):
             continue
         if re.match(r"^--\s*table\b", s, re.I):
             continue
@@ -323,26 +452,45 @@ def _extract_title(lines) -> str:
 
 
 def _extract_metadata(lines):
-    """Return (standard, version, description) from metadata lines."""
+    """Return (standard, version, description, metadata) from header lines.
+
+    `metadata` is a dict of every metadata key/value pair found (e.g.
+    {"Audit Type": "Safety", "Site / Area": "Production Line A"}), so header
+    fields no longer leak into the questions list. standard/version/description
+    default to None unless the document states them.
+    """
     standard = version = description = None
-    for l in lines[:20]:
+    metadata = {}
+    for l in lines[:25]:
         s = l.strip()
-        for part in re.split(r"[|;]", s):
-            p = part.strip()
-            m = re.match(r"^standard\s*[:\-]\s*(.+)$", p, re.I)
-            if m and not standard:
-                standard = m.group(1).strip()
-            m = re.match(r"^version\s*[:\-]\s*(.+)$", p, re.I)
-            if m and not version:
-                version = m.group(1).strip()
-            m = re.match(r"^description\s*[:\-]\s*(.+)$", p, re.I)
-            if m and not description:
-                description = m.group(1).strip()
-    if not standard:
-        standard = DEFAULT_STANDARD
-    if not version:
-        version = DEFAULT_VERSION
-    return standard, version, description
+        if not s:
+            continue
+        parts = [p.strip() for p in re.split(r"[|;]", s) if p.strip()]
+        i = 0
+        while i < len(parts):
+            p = parts[i]
+            key = val = None
+            # Colon form: "Key: Value"
+            m = re.match(r"^([^:]+):\s*(.+)$", p)
+            if m and _is_meta_key(m.group(1).strip()):
+                key, val = m.group(1).strip(), m.group(2).strip()
+            # Pipe form: "Key | Value"
+            elif _is_meta_key(p.rstrip(":").strip()) and i + 1 < len(parts):
+                nxt = parts[i + 1].strip()
+                if not _is_meta_key(nxt.rstrip(":").strip()):
+                    key, val = p.rstrip(":").strip(), nxt
+                    i += 1  # consume the paired value part too
+            if key and val:
+                lkey = key.lower()
+                if lkey == "standard" and not standard:
+                    standard = val
+                elif lkey == "version" and not version:
+                    version = val
+                elif lkey == "description" and not description:
+                    description = val
+                metadata[key] = val
+            i += 1
+    return standard, version, description, metadata
 
 
 def _extract_questions(lines):
@@ -365,9 +513,7 @@ def _extract_questions(lines):
         s = line.strip()
         if not s:
             continue
-        if re.match(r"^(standard|version|description|title|auditor|date|purpose)\s*[:|]", s, re.I):
-            continue
-        if re.match(r"^sheet\s*:", s, re.I):
+        if _is_meta_row(s):
             continue
         if re.match(r"^--\s*table\b", s, re.I):
             continue
@@ -400,12 +546,11 @@ def _build_fallback_json(content: str) -> dict:
     """
     Deterministic fallback parser for the current extractor output formats
     (pipe-separated Excel/DOCX/PDF rows). Emits the exact com.audito.checksheet
-    nested format and never returns empty questions when the content has rows.
+    nested format with real sections, metadata, and checkResults.
     """
     lines = [l.strip() for l in content.splitlines() if l.strip()]
     title = _extract_title(lines)
-    standard, version, description = _extract_metadata(lines)
-    questions = _extract_questions(lines)
+    standard, version, description, metadata = _extract_metadata(lines)
 
     default_scale = _default_scale_points()
     default_likert = {"min": DEFAULT_LIKERT_MIN, "max": DEFAULT_LIKERT_MAX, "scalePoints": default_scale}
@@ -423,28 +568,117 @@ def _build_fallback_json(content: str) -> dict:
             "likert": {**default_likert, "scalePoints": [dict(sp) for sp in default_scale]},
         }
 
-    section_title = "Section 1"
-    for l in lines[:40]:
-        m = re.match(r"^section\s+(\d+)\s*[:\-\.]?\s*(.*)$", l, re.I)
-        if m:
-            section_title = f"Section {m.group(1)}"
-            if m.group(2).strip():
-                section_title = f"Section {m.group(1)}: {m.group(2).strip()}"
-            break
+    # Pre-classify lines: metadata rows and table header rows
+    is_meta = [False] * len(lines)
+    is_header = [False] * len(lines)
+    col_maps = [None] * len(lines)
+    for i, s in enumerate(lines):
+        if _is_meta_row(s):
+            is_meta[i] = True
+            continue
+        if "|" in s:
+            cells = [c.strip() for c in s.split("|") if c.strip()]
+            if _is_header_row(cells):
+                is_header[i] = True
+                col_maps[i] = _map_header_columns(cells)
 
-    section = {
-        "id": f"section-{_uuid4()}",
-        "code": "",
-        "title": section_title,
-        "description": "",
-        "weight": 1,
-        "children": [],
-        "questions": [_make_question(q) for q in questions],
-    }
+    sections = []
+    cur_section = None
+    cur_mapping = {"q": -1, "result": -1, "remark": -1}
+    seen_q = set()
+    check_results = []
+    has_result_col = False
+
+    def add_question(title_text, qid):
+        nonlocal cur_section
+        key = title_text.lower()[:80]
+        if key in seen_q:
+            return False
+        seen_q.add(key)
+        if cur_section is None:
+            cur_section = {
+                "id": f"section-{_uuid4()}",
+                "code": "",
+                "title": "Section 1",
+                "description": "",
+                "weight": 1,
+                "children": [],
+                "questions": [],
+            }
+            sections.append(cur_section)
+        q_obj = _make_question(title_text)
+        q_obj["id"] = qid
+        cur_section["questions"].append(q_obj)
+        return True
+
+    def new_section(name):
+        nonlocal cur_section
+        cur_section = {
+            "id": f"section-{_uuid4()}",
+            "code": "",
+            "title": name,
+            "description": "",
+            "weight": 1,
+            "children": [],
+            "questions": [],
+        }
+        sections.append(cur_section)
+
+    for i, s in enumerate(lines):
+        if is_meta[i]:
+            continue
+        if is_header[i]:
+            cur_mapping = col_maps[i]
+            if cur_mapping["result"] != -1 or cur_mapping["remark"] != -1:
+                has_result_col = True
+            continue
+        if "|" in s:
+            # Pipe row → data row
+            cells = [c.strip() for c in s.split("|") if c.strip()]
+            if not cells:
+                continue
+            q_title, result, remark = _parse_data_row(cells, cur_mapping)
+            if q_title and len(q_title) >= 2 and not re.fullmatch(r"[0-9.,%\-/: ]+", q_title):
+                qid = f"question-{_uuid4()}"
+                if add_question(q_title, qid):
+                    # One checkResults entry per question whenever the document
+                    # has a result/remark column (blank cells become null).
+                    if has_result_col:
+                        check_results.append({
+                            "questionId": qid,
+                            "result": result or None,
+                            "remark": remark or None,
+                        })
+            continue
+        # Non-pipe line: might be a section heading or an explicit "Section N" marker
+        # Explicit section heading: short, non-numeric, non-title, and the NEXT
+        # non-meta line is a header row (category label above its table).
+        nxt = i + 1
+        while nxt < len(lines) and is_meta[nxt]:
+            nxt += 1
+        if (len(s) <= 80
+                and not re.fullmatch(r"[0-9\-\.,\s]+", s)
+                and s.lower() != title.lower()
+                and nxt < len(lines) and is_header[nxt]):
+            new_section(s)
+            continue
+        # "Section N" / "Section N: Title" (no header following)
+        m = re.match(r"^section\s+(\d+)\s*[:\-\.]?\s*(.*)$", s, re.I)
+        if m:
+            sec_name = f"Section {m.group(1)}"
+            if m.group(2).strip():
+                sec_name = f"Section {m.group(1)}: {m.group(2).strip()}"
+            new_section(sec_name)
+            continue
+
+    # Drop empty sections
+    sections = [sec for sec in sections if sec["questions"]]
+    if not sections:
+        new_section("Section 1")
 
     template_id = f"template-{_uuid4()}"
 
-    return {
+    res = {
         "schema": DEFAULT_SCHEMA,
         "schemaVersion": DEFAULT_SCHEMA_VERSION,
         "exportedAt": None,
@@ -466,7 +700,7 @@ def _build_fallback_json(content: str) -> dict:
                 "threshold": DEFAULT_THRESHOLD,
                 "scalePoints": default_scale,
             },
-            "sections": [section],
+            "sections": sections,
             "sectionNumberingTypes": [
                 "numeric",
                 "upper_alpha",
@@ -476,6 +710,11 @@ def _build_fallback_json(content: str) -> dict:
             ],
         },
     }
+    if check_results:
+        res["checkResults"] = check_results
+    if metadata:
+        res["metadata"] = metadata
+    return res
 
 
 # ─── Main Entry Point ─────────────────────────────────────────────────────────
