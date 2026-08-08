@@ -14,6 +14,12 @@ from typing import Any
 from jsonschema import Draft7Validator, ValidationError, SchemaError
 
 logger = logging.getLogger(__name__)
+from app.services.parser_utils import (
+    is_administrative_or_meta,
+    is_clean_title,
+    clean_up_title,
+    split_title_and_help_text,
+)
 
 # ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -125,8 +131,15 @@ def _normalize_question(q: dict, defaults: dict) -> dict:
         return None
 
     q["id"] = _fix_id_prefix(q.get("id", ""), "question-")
-    q.setdefault("title", "")
-    q.setdefault("helpText", "")
+    title = (q.get("title") or "").strip()
+    help_text = (q.get("helpText") or "").strip()
+
+    # If helpText is empty, split the title into core subject and helpText
+    if title and not help_text:
+        title, help_text = split_title_and_help_text(title)
+
+    q["title"] = title
+    q["helpText"] = help_text
     q.setdefault("type", defaults.get("questionType", "likert_observation"))
     q.setdefault("required", defaults.get("required", True))
     q.setdefault("evidenceRequired", defaults.get("evidenceRequired", True))
@@ -180,12 +193,19 @@ def _normalize_section(sec: dict, defaults: dict, section_idx: int = 1) -> dict:
             normalized_children.append(normalized)
     sec["children"] = normalized_children
 
-    # Normalize questions
+    # Normalize questions, filtering out administrative/metadata fields
     questions = sec.get("questions")
     if not isinstance(questions, list):
         questions = []
     normalized_questions = []
     for q in questions:
+        if isinstance(q, dict):
+            title = (q.get("title") or "").strip()
+            if is_administrative_or_meta(title):
+                continue
+            split_title, _ = split_title_and_help_text(title)
+            if is_administrative_or_meta(split_title):
+                continue
         normalized = _normalize_question(q, defaults)
         if normalized:
             normalized_questions.append(normalized)
@@ -227,8 +247,13 @@ def auto_correct(data: dict) -> dict:
     tmpl = data["template"]
 
     # Auto-correct Title
-    if not tmpl.get("title"):
-        tmpl["title"] = "Checksheet Document"
+    title = tmpl.get("title", "").strip()
+    if not is_clean_title(title):
+        clean_title = clean_up_title(title)
+        if is_clean_title(clean_title):
+            tmpl["title"] = clean_title
+        else:
+            tmpl["title"] = "Audit Checksheet"
 
     # Auto-correct ID (ensure template- prefix)
     tmpl["id"] = _fix_id_prefix(tmpl.get("id", ""), "template-")
@@ -287,6 +312,12 @@ def auto_correct(data: dict) -> dict:
             normalized_sections.append(normalized)
 
     tmpl["sections"] = normalized_sections
+
+    # Clean up checkResults to match remaining questions only
+    cr = data.get("checkResults")
+    if isinstance(cr, list) and cr:
+        valid_ids = {q["id"] for s in normalized_sections for q in s.get("questions") or []}
+        data["checkResults"] = [r for r in cr if isinstance(r, dict) and r.get("questionId") in valid_ids]
 
     return data
 

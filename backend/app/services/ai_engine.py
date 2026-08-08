@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 from openai import AsyncOpenAI
 
 from app.config import get_settings
+from app.services.parser_utils import (
+    is_administrative_or_meta,
+    is_clean_title,
+    split_title_and_help_text,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -62,18 +67,26 @@ def _default_scale_points() -> list[dict]:
 SYSTEM_PROMPT = """You are an expert Document Intelligence Lead. Convert checksheet / audit-checklist document content into the target JSON schema with 100% literal data integrity.
 
 --- 1. TITLE & METADATA ---
-- TITLE: template.title must be the main document heading, verbatim. STRIP extraction artifacts from the title: a leading "Sheet:", "Form:", "=== Page N ===", "-- Table N --", or dash/equals/hash decoration. NEVER use "Page 1", "Sheet: ...", "Table 1", or a section marker as the title.
+- TITLE: template.title must be the main document heading, verbatim. STRIP extraction artifacts from the title: a leading "Sheet:", "Form:", "=== Page N ===", "-- Table N --", or dash/equals/hash decoration.
+- NEVER use table headers (e.g. containing "Client Site Name", "Sr. No", "Score", "Maturity", "Control ID", etc.) or administrative field names as the document title. If no clean, actual document title can be parsed, set template.title to "Audit Checksheet".
 - standard / version: read ONLY from metadata lines such as "Standard: X" or "Version: X". If the document does NOT state a standard or version, set standard = null and version = null. NEVER invent, guess, or default a standard code or version number.
 - description: an intro paragraph if present, otherwise null.
 
---- 2. QUESTIONS (MOST IMPORTANT RULE) ---
-- EVERY data row in a table or list in the document is EXACTLY ONE question. Convert each row into one question object.
-- The descriptive text column - the one whose text reads like an audit question or requirement (commonly headed "Control Requirement", "Requirement", "Check", "Question", "Description", or the longest text column) - becomes question.title, verbatim. Do not paraphrase.
-- DO NOT skip, merge, or drop any row. If the document has N data rows, output exactly N question objects.
-- NEVER return an empty questions array when the document contains question rows. Every section that has questions must list ALL of them.
+--- 2. QUESTIONS & FILTERS ---
+- EVERY data row in a table or list in the document is EXACTLY ONE question, UNLESS it represents an administrative or metadata field.
+- FILTER OUT administrative and metadata fields: Do NOT create questions for administrative cells or rows. Specifically, identify and exclude fields like "Client Site Name", "Site Coordinator Name", "Total Score", "Grade", "Effective Date", and "Disclaimer". These must NOT appear in the questions array. If they contain metadata values, they may be mapped to the top-level metadata object instead.
+- For valid question rows:
+  - The descriptive text column - the one whose text reads like an audit question or requirement (commonly headed "Control Requirement", "Requirement", "Check", "Question", "Description", or the longest text column) - becomes question.title and question.helpText.
+  - If the descriptive text contains a core subject followed by long instructional sentences or details (commonly separated by a colon, dash, or period, e.g. "Chemical Safety: Look for a documented process for chemical safety..."), map the core subject (e.g. "Chemical Safety") to question.title and the long instructional/explanatory sentences (e.g. "Look for a documented process for chemical safety...") to question.helpText. If no separate subject exists, put the full text in question.title and leave helpText empty.
+  - Do not paraphrase.
+- DO NOT skip, merge, or drop any valid audit question row.
 - Example mapping:
   Input row:  FS-01 | Fire | Are fire extinguishers inspected monthly and tagged with inspection dates? | 4 | Documented
   Output:     {"id": "question-<uuid4>", "title": "Are fire extinguishers inspected monthly and tagged with inspection dates?", "helpText": "", "type": "likert_observation", "required": true, "evidenceRequired": true, "weight": 1, "threshold": 3, "likert": { "min": 0, "max": 5, "scalePoints": [ same six points as defaults below ] }}
+  
+  Input row:  Chemical Safety: Look for a documented process for chemical safety. Ensure MSDS sheets are available. | 3 | Checked
+  Output:     {"id": "question-<uuid4>", "title": "Chemical Safety", "helpText": "Look for a documented process for chemical safety. Ensure MSDS sheets are available.", "type": "likert_observation", "required": true, "evidenceRequired": true, "weight": 1, "threshold": 3, "likert": { "min": 0, "max": 5, "scalePoints": [ same six points as defaults below ] }}
+
 - Each question gets a real uuid4 ("question-<uuid4>"). Questions have no "code" field; row/control IDs such as "FS-01" may be omitted or folded into helpText.
 
 --- 3. SECTIONS ---
@@ -300,6 +313,15 @@ _HEADER_WORD_RE = re.compile(
     re.I,
 )
 
+# Looser variant: match header words anywhere in the cell text (not just at
+# the start). Used by _is_header_row to catch "Observed Score", "Max Score",
+# "Status", etc. where the keyword is not the first word.
+_HEADER_CELL_RE = re.compile(
+    r"\b(no\.?|item|control|requirement|maturity|evidence|section|status|check|question|id|score|"
+    r"weight|remarks?|column|criterion|criteria|result|outcome|verdict|audit|observation|metric)\b",
+    re.I,
+)
+
 # Metadata field labels. These appear in checksheet headers ("Audit Type: Safety",
 # "Site / Area | Production Line A", "Standard | BEC 1500:2024") and must be
 # captured as metadata instead of leaking into questions.
@@ -327,11 +349,19 @@ def _is_meta_row(line: str) -> bool:
 
 
 def _is_header_row(cells) -> bool:
-    """True when every meaningful cell in a pipe row looks like a column header."""
+    """True when most meaningful cells in a pipe row look like column headers.
+
+    Uses the looser _HEADER_CELL_RE (match anywhere in cell) and requires ≥50%
+    of meaningful (non-numeric, non-empty) cells to match, so rows like
+    "Client Site Name | Sr. No | Score | Observed Score | Max Score | % Score"
+    are correctly detected as headers even though "Client Site Name" itself
+    does not contain a header keyword.
+    """
     meaningful = [c for c in cells if c and not re.fullmatch(r"[0-9\-\.,\s]+", c)]
     if not meaningful:
         return False
-    return all(_HEADER_WORD_RE.match(c) for c in meaningful)
+    hits = sum(1 for c in meaningful if _HEADER_CELL_RE.search(c))
+    return hits >= len(meaningful) / 2
 
 
 # Patterns for mapping header cells to column roles (question / result / remark)
@@ -436,6 +466,8 @@ def _extract_title(lines) -> str:
             continue
         if _is_meta_row(s):
             continue
+        if "|" in s:
+            continue  # table row — not a document title
         if re.match(r"^section\s+\d+", s, re.I):
             continue
         if re.match(r"^page\s+\d+", s, re.I):
@@ -446,9 +478,9 @@ def _extract_title(lines) -> str:
         m = re.match(r"^(?:sheet|form|page)\s*[:\-]\s*(.+)$", cleaned, re.I)
         if m:
             cleaned = m.group(1).strip()
-        if cleaned:
+        if is_clean_title(cleaned):
             return cleaned
-    return "Checksheet Document"
+    return "Audit Checksheet"
 
 
 def _extract_metadata(lines):
@@ -556,10 +588,11 @@ def _build_fallback_json(content: str) -> dict:
     default_likert = {"min": DEFAULT_LIKERT_MIN, "max": DEFAULT_LIKERT_MAX, "scalePoints": default_scale}
 
     def _make_question(title_text: str) -> dict:
+        q_title, q_help = split_title_and_help_text(title_text)
         return {
             "id": f"question-{_uuid4()}",
-            "title": title_text,
-            "helpText": "",
+            "title": q_title,
+            "helpText": q_help,
             "type": "likert_observation",
             "required": True,
             "evidenceRequired": True,
@@ -591,7 +624,15 @@ def _build_fallback_json(content: str) -> dict:
 
     def add_question(title_text, qid):
         nonlocal cur_section
-        key = title_text.lower()[:80]
+        # Filter administrative/metadata fields
+        if is_administrative_or_meta(title_text):
+            return False
+        
+        q_title, q_help = split_title_and_help_text(title_text)
+        if is_administrative_or_meta(q_title):
+            return False
+
+        key = q_title.lower()[:80]
         if key in seen_q:
             return False
         seen_q.add(key)
